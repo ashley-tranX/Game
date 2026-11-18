@@ -3,10 +3,10 @@ const path = require('path');
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1280,
-    height: 720,
-    minWidth: 640,
-    minHeight: 360,
+    width: 1152,
+    height: 648,
+    minWidth: 384,
+    minHeight: 216,
     useContentSize: true,
     backgroundColor: '#07070c',
     title: 'StreeFight',
@@ -23,7 +23,7 @@ function createWindow() {
       event.preventDefault();
     }
   });
-  // 游戏是纯离线的: 禁止打开任何外部窗口/跳转
+  // Fully offline game: block new windows and navigation
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', e => e.preventDefault());
 }

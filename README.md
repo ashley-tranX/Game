@@ -1,45 +1,46 @@
 # StreeFight
 
-原创 2D 单机格斗游戏。纯 Canvas 绘制，无外部素材、无联网需求，用 Electron 打包成 Windows 11 安装程序。
+An original retro-style 2D fighting game. Everything is generated at runtime — pixel art is drawn in code on a 384x216 buffer, sound is synthesized with WebAudio — so there are no asset files and no network access. Packaged with Electron as a Windows 11 installer.
 
-## 玩法
+## Game
 
-- 单人 vs CPU（简单 / 普通 / 困难）或本地双人对战
-- 三局两胜，每局 60 秒
-- 按住「后」（远离对手的方向）防御；蹲下或跳跃可以躲开气功波
-- 气功波消耗 35 点能量，命中和被打都会涨能量
+- 1P vs CPU (Easy / Normal / Hard) or local 2P versus
+- Best of three rounds, 60 seconds each
+- Hold back (away from the opponent) to block; crouch or jump to avoid projectiles
+- Specials cost 35 energy; landing or taking hits builds energy
+- Combos: a landed punch cancels into a kick, and any landed normal cancels into a special
 
-| 动作 | P1 | P2 |
+| Action | P1 | P2 |
 | --- | --- | --- |
-| 移动 | A / D | ← / → |
-| 跳 / 蹲 | W / S | ↑ / ↓ |
-| 拳 | J | `,` 或 小键盘 1 |
-| 腿 | K | `.` 或 小键盘 2 |
-| 气功波 | L | `/` 或 小键盘 3 |
+| Move | A / D | Left / Right |
+| Jump / Crouch | W / S | Up / Down |
+| Punch | J | `,` or Numpad 1 |
+| Kick | K | `.` or Numpad 2 |
+| Special | L, or Down, Down+Forward, Forward + Punch | `/` or Numpad 3, or the same motion |
 
-Esc 暂停，F11 全屏。
+Esc pauses, M toggles music, F11 toggles fullscreen.
 
-## 安装包（Windows 11）
+## Windows 11 installers
 
-推送到 `main` 或打 `v*` 标签后，GitHub Actions 会自动构建三个安装包：
+Pushing to `main` or pushing a `v*` tag runs GitHub Actions and builds three installers:
 
-| 文件 | 适用 |
+| File | For |
 | --- | --- |
-| `StreeFight Setup 1.0.0-x64.exe`（文件名含 x64） | Intel / AMD 64 位 |
-| `StreeFight Setup 1.0.0-arm64.exe`（文件名含 arm64） | ARM64（如骁龙 X） |
-| `StreeFight Setup 1.0.0.exe` | 通用包，同时含两种架构，安装时自动选择 |
+| `StreeFight Setup 1.0.0-x64.exe` (name contains x64) | Intel / AMD 64-bit |
+| `StreeFight Setup 1.0.0-arm64.exe` (name contains arm64) | ARM64 (e.g. Snapdragon X) |
+| `StreeFight Setup 1.0.0.exe` | Universal: contains both, picks the right one at install time |
 
-- 推送到 `main`：在 Actions 页面对应运行记录的 Artifacts 里下载
-- 打标签（如 `git tag v1.0.0 && git push --tags`）：安装包会附在 Release 页面
+- Push to `main`: download from the run's Artifacts on the Actions page
+- Push a tag (`git tag v1.0.0 && git push --tags`): installers are attached to the Release
 
-安装包没有代码签名，首次运行时 Windows SmartScreen 会提示，点「更多信息 → 仍要运行」。
+The installers are not code-signed, so Windows SmartScreen will warn on first run: choose "More info" then "Run anyway".
 
-## 本地开发
+## Development
 
 ```bash
 npm install
-npm start          # 运行游戏
-npm run dist       # 在 Windows 上构建全部安装包，输出到 dist/
+npm start          # run the game
+npm run dist       # build all installers on Windows, output in dist/
 ```
 
-也可以直接用浏览器打开 `src/index.html` 试玩。
+You can also open `src/index.html` directly in a browser.

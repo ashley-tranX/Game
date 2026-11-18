@@ -2,7 +2,7 @@
   "name": "streefight",
   "productName": "StreeFight",
   "version": "1.0.0",
-  "description": "StreeFight - 原创 2D 单机格斗游戏",
+  "description": "StreeFight - an original retro-style 2D fighting game",
   "main": "main.js",
   "author": "StreeFight",
   "license": "MIT",

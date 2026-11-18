@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # 一次构建产出三个安装包: x64、arm64、以及同时包含两种架构的通用安装包
+      # One build produces three installers: x64, arm64, and a universal one containing both
       - name: Build installers (x64 + arm64 + universal)
         run: npx electron-builder --win --x64 --arm64 --publish never
 

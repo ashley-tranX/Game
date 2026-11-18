@@ -1,27 +1,34 @@
-/* StreeFight — 原创 2D 格斗游戏 (纯 Canvas, 无依赖) */
+/* StreeFight - original retro-style 2D fighter. Pure Canvas + WebAudio, no assets. */
 (() => {
 'use strict';
 
-const W = 960, H = 540, GROUND = 452, GRAV = 0.7, WALK = 3.6, JUMP = -13.5;
+/* World units are 960x540; the screen is a 384x216 pixel buffer (S = 0.4). */
+const W = 960, H = 540, GROUND = 452, GRAV = 0.7, WALK = 4.2, JUMP = -15.5;
+const SW = 384, SH = 216, S = 0.4, SPR = 1.4, EDGE = 56;
 const ROUND_TIME = 60, WINS_NEEDED = 2;
-const FONT = '"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif';
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
 
-// 招式表: startup 起手, active 判定, total 总帧数
+// Frame data: startup / active / total
 const ATK = {
-  punch:   { startup: 5,  active: 4, total: 17, dmg: 6,  range: 82,  kb: 5 },
-  kick:    { startup: 8,  active: 5, total: 27, dmg: 10, range: 108, kb: 7 },
+  punch:   { startup: 5,  active: 4, total: 17, dmg: 6,  range: 112, kb: 5 },
+  kick:    { startup: 8,  active: 5, total: 27, dmg: 10, range: 150, kb: 7 },
   special: { startup: 14, active: 0, total: 36, dmg: 14, cost: 35 },
 };
 
 const CHARS = [
-  { name: '岚', sub: 'LAN', body: '#2f7bff', trim: '#bfe0ff', skin: '#f2c9a0', fx: '#6fd0ff' },
-  { name: '焰', sub: 'YAN', body: '#e23b3b', trim: '#ffd27a', skin: '#e0ad84', fx: '#ffb347' },
+  { name: 'LAN', move: 'AERO BURST', body: '#2f6fe0', dark: '#1b3f96', light: '#6fa8ff', trim: '#e8f2ff',
+    skin: '#f0c090', skinD: '#c48a5c', hair: '#18305c', pants: '#2a2a44', fx: '#7fe0ff', fxD: '#2f8fe0',
+    pitch: 175, vowels: ['e', 'o', 'uh'] },
+  { name: 'YAN', move: 'EMBER SHOT', body: '#d83a2e', dark: '#8c1f1a', light: '#ff7a5c', trim: '#ffd23f',
+    skin: '#dca070', skinD: '#a86c44', hair: '#3a1408', pants: '#3a2622', fx: '#ffc04a', fxD: '#f0601e',
+    pitch: 128, vowels: ['e', 'uh', 'a'] },
 ];
+const OUT = '#120c1c';
 
-/* ---------- 输入 ---------- */
+/* ---------- Input ---------- */
 const keys = new Set(), pressed = new Set();
 const KEYMAP = [
   { left: ['KeyA'], right: ['KeyD'], up: ['KeyW'], down: ['KeyS'],
@@ -48,50 +55,114 @@ function readInput(i) {
   };
 }
 
-/* ---------- 音效 (WebAudio 合成) ---------- */
-let actx = null;
+/* ---------- Audio: chip-style synth, all generated at runtime ---------- */
+let actx = null, noiseBuf = null, musicOn = true;
 function initAudio() {
   if (actx) return;
-  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) { actx = null; }
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    actx = new AC();
+    noiseBuf = actx.createBuffer(1, actx.sampleRate * 0.5, actx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  } catch (_) { actx = null; }
 }
-function beep(freq, dur, type = 'square', vol = 0.08, slide = 0) {
+function tone(freq, dur, type = 'square', vol = 0.06, slide = 0, delay = 0) {
   if (!actx) return;
   try {
-    const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+    const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + delay;
     o.type = type; o.frequency.setValueAtTime(freq, t);
     if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.setValueAtTime(vol, t + dur * 0.6);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur + 0.01);
+  } catch (_) {}
+}
+function noise(dur, vol = 0.08, freq = 3000, delay = 0) {
+  if (!actx || !noiseBuf) return;
+  try {
+    const s = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain(), t = actx.currentTime + delay;
+    s.buffer = noiseBuf; f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 0.8;
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur);
+    s.connect(f).connect(g).connect(actx.destination); s.start(t); s.stop(t + dur + 0.01);
+  } catch (_) {}
+}
+const VOWEL = { a: [800, 1250], e: [520, 1850], o: [460, 820], uh: [620, 1150] };
+// Gritty formant "shout": three synthesized syllables, last one held.
+function shout(ch) {
+  if (!actx) return;
+  try {
+    const t0 = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+    const f1 = actx.createBiquadFilter(), f2 = actx.createBiquadFilter();
+    o.type = 'sawtooth'; f1.type = f2.type = 'bandpass'; f1.Q.value = 6; f2.Q.value = 9;
+    g.gain.setValueAtTime(0.0001, t0);
+    let t = t0;
+    ch.vowels.forEach((v, i) => {
+      const last = i === ch.vowels.length - 1, len = last ? 0.26 : 0.11;
+      f1.frequency.setValueAtTime(VOWEL[v][0], t); f2.frequency.setValueAtTime(VOWEL[v][1], t);
+      o.frequency.setValueAtTime(ch.pitch * (last ? 1.25 : 1 + i * 0.06), t);
+      if (last) o.frequency.linearRampToValueAtTime(ch.pitch * 0.9, t + len);
+      g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.5, t + 0.02);
+      g.gain.setValueAtTime(0.5, t + len * 0.7); g.gain.linearRampToValueAtTime(0.0001, t + len);
+      if (last) noise(0.06, 0.07, 2200, t - t0);
+      t += len + 0.015;
+    });
+    o.connect(f1).connect(g); o.connect(f2).connect(g); g.connect(actx.destination);
+    o.start(t0); o.stop(t + 0.02);
   } catch (_) {}
 }
 const sfx = {
-  swing: () => beep(320, 0.07, 'triangle', 0.05, -180),
-  hit:   () => { beep(160, 0.12, 'sawtooth', 0.12, -110); beep(90, 0.1, 'square', 0.08, -40); },
-  block: () => beep(520, 0.05, 'square', 0.05, -100),
-  fire:  () => beep(240, 0.3, 'sawtooth', 0.07, 500),
-  ko:    () => beep(220, 0.9, 'sawtooth', 0.12, -180),
-  bell:  () => beep(880, 0.35, 'triangle', 0.1),
-  ui:    () => beep(660, 0.08, 'square', 0.05),
+  swing: () => noise(0.07, 0.05, 1800),
+  hit:   () => { noise(0.12, 0.16, 900); tone(140, 0.1, 'square', 0.08, -80); },
+  block: () => { noise(0.04, 0.07, 4500); tone(520, 0.04, 'square', 0.04, -100); },
+  fire:  () => { tone(220, 0.28, 'square', 0.05, 520, 0.3); noise(0.25, 0.05, 1200, 0.3); },
+  ko:    () => { tone(330, 0.7, 'square', 0.08, -260); noise(0.5, 0.12, 500); },
+  bell:  () => { tone(784, 0.1, 'square', 0.06); tone(1047, 0.25, 'square', 0.06, 0, 0.1); },
+  ui:    () => tone(660, 0.05, 'square', 0.04),
+  win:   () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.14, 'square', 0.06, 0, i * 0.12)),
 };
 
-/* ---------- 游戏状态 ---------- */
+/* Original 4-bar loop: square lead, triangle bass, noise drums. */
+const LEAD = [
+  69,0,72,0,76,0,74,72, 0,69,0,0,67,0,69,0,
+  65,0,69,0,72,0,77,76, 0,72,0,0,69,0,72,0,
+  67,0,71,0,74,0,79,77, 0,74,0,71,0,74,0,0,
+  76,0,0,74,0,71,0,67, 64,0,67,0,71,0,74,76,
+];
+const ROOTS = [45, 41, 43, 40];
+const BASS = [0,-1,0,12,-1,0,12,-1, 0,-1,0,12,-1,0,7,12];
+const mf = n => 440 * Math.pow(2, (n - 69) / 12);
+let mStep = 0, mClock = 0;
+function musicTick() {
+  if (!actx || !musicOn) return;
+  if (++mClock < 7) return;
+  mClock = 0;
+  const i = mStep % 64, s = i % 16, quiet = G.scene === 'menu' ? 0.6 : 1;
+  if (LEAD[i]) tone(mf(LEAD[i]), 0.16, 'square', 0.028 * quiet);
+  if (BASS[s] >= 0) tone(mf(ROOTS[i >> 4] + BASS[s]), 0.11, 'triangle', 0.09 * quiet);
+  if (s === 0 || s === 6 || s === 8) tone(120, 0.08, 'triangle', 0.12 * quiet, -80);
+  if (s === 4 || s === 12) noise(0.08, 0.05 * quiet, 1800);
+  if (s % 2 === 0) noise(0.02, 0.018 * quiet, 7000);
+  mStep++;
+}
+
+/* ---------- State ---------- */
 const G = {
   scene: 'menu',      // menu | intro | fight | roundEnd | matchEnd
-  mode: 'cpu',        // cpu | pvp
-  level: 1,           // 0 简单 1 普通 2 困难
-  paused: false,
-  round: 1, timer: ROUND_TIME, frame: 0, sceneT: 0,
-  shake: 0, hitstop: 0, banner: '',
-  fighters: [], shots: [], sparks: [],
+  mode: 'cpu', level: 1, paused: false,
+  round: 1, timer: ROUND_TIME, frame: 0, tick: 0, sceneT: 0,
+  shake: 0, hitstop: 0, banner: '', sub: '',
+  fighters: [], shots: [], sparks: [], popups: [],
   ai: { plan: 'idle', t: 0, fresh: false },
   menuSel: 0,
 };
 
 function makeFighter(i) {
   return {
-    i, ch: CHARS[i], x: i ? W - 260 : 260, y: GROUND, vx: 0, vy: 0, facing: i ? -1 : 1,
+    i, ch: CHARS[i], x: i ? W - 280 : 280, y: GROUND, vx: 0, vy: 0, facing: i ? -1 : 1,
     hp: 100, shownHp: 100, energy: 0, state: 'idle', t: 0, hasHit: false,
-    blocking: false, walk: 0, wins: 0,
+    blocking: false, walk: 0, wins: 0, mD: -99, mDF: -99, mF: -99, combo: 0, comboT: 0,
   };
 }
 
@@ -105,12 +176,12 @@ function startRound() {
   const wins = G.fighters.map(f => f.wins);
   G.fighters = [makeFighter(0), makeFighter(1)];
   G.fighters.forEach((f, i) => f.wins = wins[i]);
-  G.shots = []; G.sparks = [];
+  G.shots = []; G.sparks = []; G.popups = [];
   G.timer = ROUND_TIME; G.frame = 0; G.scene = 'intro'; G.sceneT = 0;
   G.ai = { plan: 'idle', t: 0, fresh: false };
 }
 
-/* ---------- AI ---------- */
+/* ---------- CPU ---------- */
 function aiInput(me, opp) {
   const inp = { left: false, right: false, up: false, down: false, punch: false, kick: false, special: false };
   const ai = G.ai, lv = G.level;
@@ -118,24 +189,24 @@ function aiInput(me, opp) {
   const toward = opp.x > me.x ? 'right' : 'left', away = opp.x > me.x ? 'left' : 'right';
   const react = [0.25, 0.55, 0.85][lv];
 
-  // 应对飞行道具
-  const threat = G.shots.find(s => s.owner !== me && Math.abs(s.x - me.x) < 150 && Math.sign(s.vx) === Math.sign(me.x - s.x));
+  const threat = G.shots.find(s => s.owner !== me && Math.abs(s.x - me.x) < 190 && Math.sign(s.vx) === Math.sign(me.x - s.x));
   if (threat && ai.plan !== 'dodge' && Math.random() < react * 0.3) {
-    ai.plan = 'dodge'; ai.t = 26; ai.dodge = Math.random() < 0.5 ? 'jump' : (Math.random() < 0.5 ? 'crouch' : 'block'); ai.fresh = true;
+    ai.plan = 'dodge'; ai.t = 28; ai.dodge = Math.random() < 0.5 ? 'jump' : (Math.random() < 0.5 ? 'crouch' : 'block'); ai.fresh = true;
   }
-  // 对手出招时防御
-  if (ATK[opp.state] && opp.state !== 'special' && dist < 125 && ai.plan !== 'block' && ai.plan !== 'dodge' && Math.random() < react * 0.25) {
+  if (ATK[opp.state] && opp.state !== 'special' && dist < 170 && ai.plan !== 'block' && ai.plan !== 'dodge' && Math.random() < react * 0.25) {
     ai.plan = 'block'; ai.t = 16; ai.fresh = true;
   }
+  // Combo follow-up after a landed punch
+  if (me.state === 'punch' && me.hasHit && Math.random() < react * 0.5) { inp.kick = true; return inp; }
 
   if (--ai.t <= 0) {
     const r = Math.random();
     ai.fresh = true;
-    if (dist > 330) {
+    if (dist > 380) {
       if (me.energy >= ATK.special.cost && r < 0.3 + lv * 0.1) ai.plan = 'special';
       else if (r < 0.85) ai.plan = 'approach';
       else ai.plan = 'idle';
-    } else if (dist > 115) {
+    } else if (dist > 150) {
       if (r < 0.55) ai.plan = 'approach';
       else if (r < 0.65 && me.energy >= ATK.special.cost) ai.plan = 'special';
       else if (r < 0.75) ai.plan = 'jumpin';
@@ -156,7 +227,7 @@ function aiInput(me, opp) {
     case 'approach': inp[toward] = true; break;
     case 'retreat':  inp[away] = true; break;
     case 'block':    inp[away] = true; break;
-    case 'jumpin':   inp[toward] = true; inp.up = ai.fresh; if (me.y < GROUND - 40 && dist < 110) inp.kick = Math.random() < 0.2; break;
+    case 'jumpin':   inp[toward] = true; inp.up = ai.fresh; if (me.y < GROUND - 50 && dist < 150) inp.kick = Math.random() < 0.2; break;
     case 'punch':    inp.punch = ai.fresh; break;
     case 'kick':     inp.kick = ai.fresh; break;
     case 'special':  inp.special = ai.fresh; break;
@@ -170,14 +241,14 @@ function aiInput(me, opp) {
   return inp;
 }
 
-/* ---------- 战斗逻辑 ---------- */
+/* ---------- Combat ---------- */
 const grounded = f => f.y >= GROUND;
 const crouching = f => f.state === 'crouch';
 
 function spark(x, y, color, n = 8) {
   for (let i = 0; i < n; i++) {
-    const a = Math.random() * Math.PI * 2, s = 2 + Math.random() * 5;
-    G.sparks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1, life: 14 + Math.random() * 10, color });
+    const a = Math.random() * Math.PI * 2, s = 2 + Math.random() * 6;
+    G.sparks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1, life: 12 + Math.random() * 10, color });
   }
 }
 
@@ -185,31 +256,45 @@ function applyHit(v, atk, dir, dmg, kb, hx, hy) {
   if (v.state === 'ko') return;
   if (v.blocking) {
     v.hp -= dmg * 0.15; v.state = 'blockstun'; v.t = 11; v.vx = dir * kb * 0.7;
-    spark(hx, hy, '#cfe8ff', 5); sfx.block();
+    spark(hx, hy, '#bfe0ff', 5); sfx.block();
     atk.energy = Math.min(100, atk.energy + 3);
   } else {
+    atk.combo = v.state === 'hit' ? atk.combo + 1 : 1; atk.comboT = 70;
     v.hp -= dmg; v.state = 'hit'; v.t = 17; v.vx = dir * kb;
     if (!grounded(v)) v.vy = -5;
-    spark(hx, hy, '#fff3a0', 12); sfx.hit();
-    G.shake = 8; G.hitstop = 4;
+    spark(hx, hy, '#fff3a0', 12); G.sparks.push({ x: hx, y: hy, vx: 0, vy: 0, life: 6, color: '#ffffff', big: true });
+    sfx.hit();
+    G.shake = 8; G.hitstop = 5;
     atk.energy = Math.min(100, atk.energy + 9);
     v.energy = Math.min(100, v.energy + 5);
   }
   if (v.hp <= 0) {
     v.hp = 0; v.state = 'ko'; v.t = 0; v.vx = dir * 7; v.vy = -8; v.blocking = false;
-    G.shake = 16; G.hitstop = 10; sfx.ko();
+    G.shake = 16; G.hitstop = 14; sfx.ko();
   }
 }
 
 function startAttack(f, name) {
   f.state = name; f.t = 0; f.hasHit = false;
-  if (name === 'special') f.energy -= ATK.special.cost; else sfx.swing();
+  if (name === 'special') {
+    f.energy -= ATK.special.cost; shout(f.ch); sfx.fire();
+    G.popups.push({ text: f.ch.move + '!', x: f.x, y: f.y - 200, life: 50, color: f.ch.fx });
+  } else sfx.swing();
 }
 
 function updateFighter(f, opp, inp) {
   f.energy = Math.min(100, f.energy + 0.04);
+  if (f.comboT > 0 && --f.comboT === 0) f.combo = 0;
   const onGround = grounded(f);
-  let free = f.state === 'idle' || f.state === 'walk' || f.state === 'crouch' || f.state === 'jump';
+  const free = f.state === 'idle' || f.state === 'walk' || f.state === 'crouch' || f.state === 'jump';
+
+  // Motion buffer: down, down-forward, forward + punch
+  const fwd = f.facing === 1 ? inp.right : inp.left;
+  if (inp.down && !fwd) f.mD = G.tick;
+  if (inp.down && fwd && G.tick - f.mD < 16) f.mDF = G.tick;
+  if (fwd && !inp.down && G.tick - f.mDF < 12) f.mF = G.tick;
+  const motion = inp.punch && G.tick - f.mF < 8;   // small leniency window after the motion
+  const wantSpecial = (inp.special || motion) && f.energy >= ATK.special.cost;
 
   if (f.state === 'hit' || f.state === 'blockstun') {
     f.blocking = f.state === 'blockstun';
@@ -221,24 +306,30 @@ function updateFighter(f, opp, inp) {
     f.blocking = false; f.t++;
     if (f.state === 'special') {
       if (f.t === a.startup) {
-        G.shots.push({ x: f.x + f.facing * 50, y: f.y - 80, vx: f.facing * 8, owner: f, life: 120, dmg: a.dmg });
-        sfx.fire();
+        G.shots.push({ x: f.x + f.facing * 70, y: f.y - 112, vx: f.facing * 9, owner: f, life: 120, dmg: a.dmg });
       }
-    } else if (f.t >= a.startup && f.t < a.startup + a.active && !f.hasHit) {
-      const dx = (opp.x - f.x) * f.facing;
-      if (dx > -15 && dx < a.range && Math.abs(opp.y - f.y) < 75 && opp.state !== 'ko') {
-        f.hasHit = true;
-        const hy = f.state === 'punch' ? f.y - 88 : f.y - 60;
-        applyHit(opp, f, f.facing, a.dmg, a.kb, (f.x + opp.x) / 2 + f.facing * 12, Math.min(hy, opp.y - 30));
+    } else {
+      if (f.t >= a.startup && f.t < a.startup + a.active && !f.hasHit) {
+        const dx = (opp.x - f.x) * f.facing;
+        if (dx > -20 && dx < a.range && Math.abs(opp.y - f.y) < 105 && opp.state !== 'ko') {
+          f.hasHit = true;
+          const hy = f.state === 'punch' ? f.y - 122 : f.y - 84;
+          applyHit(opp, f, f.facing, a.dmg, a.kb, (f.x + opp.x) / 2 + f.facing * 16, Math.min(hy, opp.y - 40));
+        }
+      }
+      // Cancel a landed normal into the next move
+      if (f.hasHit && onGround && f.state !== 'special') {
+        if (wantSpecial) startAttack(f, 'special');
+        else if (f.state === 'punch' && inp.kick) startAttack(f, 'kick');
       }
     }
-    if (f.t >= a.total) f.state = onGround ? 'idle' : 'jump';
+    if (ATK[f.state] && f.t >= ATK[f.state].total) f.state = onGround ? 'idle' : 'jump';
   } else if (free) {
     if (onGround) {
       f.facing = opp.x >= f.x ? 1 : -1;
       const back = f.facing === 1 ? inp.left : inp.right;
       f.blocking = back;
-      if (inp.special && f.energy >= ATK.special.cost) { startAttack(f, 'special'); f.vx = 0; }
+      if (wantSpecial) { startAttack(f, 'special'); f.vx = 0; }
       else if (inp.kick) { startAttack(f, 'kick'); f.vx = 0; }
       else if (inp.punch) { startAttack(f, 'punch'); f.vx = 0; }
       else if (inp.up) {
@@ -253,7 +344,6 @@ function updateFighter(f, opp, inp) {
     }
   }
 
-  // 物理
   if (grounded(f) && (f.state === 'hit' || f.state === 'blockstun' || f.state === 'ko')) f.vx *= 0.85;
   f.x += f.vx; f.vy += GRAV; f.y += f.vy;
   if (f.y >= GROUND) {
@@ -261,8 +351,8 @@ function updateFighter(f, opp, inp) {
     if (f.state === 'jump') { f.state = 'idle'; f.vx = 0; }
     else if (ATK[f.state]) f.vx = 0;
   }
-  f.x = Math.max(40, Math.min(W - 40, f.x));
-  f.shownHp += (f.hp - f.shownHp) * 0.12;
+  f.x = Math.max(EDGE, Math.min(W - EDGE, f.x));
+  f.shownHp += (f.hp - f.shownHp) * 0.1;
 }
 
 function updateShots() {
@@ -270,14 +360,14 @@ function updateShots() {
     s.x += s.vx; s.life--;
     if (s.x < -40 || s.x > W + 40) s.life = 0;
     for (const o of G.shots) {
-      if (o !== s && o.owner !== s.owner && o.life > 0 && s.life > 0 && Math.abs(o.x - s.x) < 26) {
+      if (o !== s && o.owner !== s.owner && o.life > 0 && s.life > 0 && Math.abs(o.x - s.x) < 34) {
         spark((o.x + s.x) / 2, s.y, '#ffffff', 14); o.life = s.life = 0; sfx.block();
       }
     }
     const v = G.fighters[1 - s.owner.i];
     if (s.life > 0 && v.state !== 'ko') {
-      const top = v.y - (crouching(v) ? 70 : 122);
-      if (Math.abs(s.x - v.x) < 30 && s.y > top && s.y < v.y) {
+      const top = v.y - (crouching(v) ? 98 : 170);
+      if (Math.abs(s.x - v.x) < 40 && s.y > top && s.y < v.y) {
         applyHit(v, s.owner, Math.sign(s.vx), s.dmg, 7, s.x, s.y); s.life = 0;
       }
     }
@@ -285,263 +375,357 @@ function updateShots() {
   G.shots = G.shots.filter(s => s.life > 0);
 }
 
-function endRound(winner) {
-  G.scene = 'roundEnd'; G.sceneT = 0;
-  if (winner) { winner.wins++; G.banner = 'K.O.'; }
-  else G.banner = '平局';
+function endRound(winner, banner) {
+  G.scene = 'roundEnd'; G.sceneT = 0; G.banner = banner; G.sub = '';
+  if (winner) { winner.wins++; if (winner.hp >= 100) G.sub = 'PERFECT'; }
+  else G.sub = 'DRAW';
 }
 
+const NONE = { left: false, right: false, up: false, down: false, punch: false, kick: false, special: false };
+
 function step() {
-  if (pressed.has('Escape') && G.scene !== 'menu') {
-    G.paused = !G.paused; sfx.ui();
-  }
+  if (pressed.has('KeyM')) musicOn = !musicOn;
+  if (pressed.has('Escape') && G.scene !== 'menu') { G.paused = !G.paused; sfx.ui(); }
+  pressed.delete('KeyM'); pressed.delete('Escape');
   if (G.paused) {
     if (pressed.has('KeyQ')) { G.paused = false; G.scene = 'menu'; }
     pressed.clear(); return;
   }
+  musicTick();
+  G.tick++;
 
-  G.sparks.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.3; p.life--; });
+  G.sparks.forEach(p => { p.x += p.vx; p.y += p.vy; if (!p.big) p.vy += 0.35; p.life--; });
   G.sparks = G.sparks.filter(p => p.life > 0);
+  G.popups.forEach(p => { p.y -= 0.6; p.life--; });
+  G.popups = G.popups.filter(p => p.life > 0);
   if (G.shake > 0) G.shake--;
 
   if (G.scene === 'menu') {
+    const ok = pressed.has('Enter') || pressed.has('Space');
     if (pressed.has('ArrowUp') || pressed.has('KeyW')) { G.menuSel = (G.menuSel + 2) % 3; sfx.ui(); }
     if (pressed.has('ArrowDown') || pressed.has('KeyS')) { G.menuSel = (G.menuSel + 1) % 3; sfx.ui(); }
-    if (G.menuSel === 2 && (pressed.has('ArrowLeft') || pressed.has('KeyA'))) { G.level = (G.level + 2) % 3; sfx.ui(); }
-    if (G.menuSel === 2 && (pressed.has('ArrowRight') || pressed.has('KeyD') || pressed.has('Enter') || pressed.has('Space'))) { G.level = (G.level + 1) % 3; sfx.ui(); }
-    else if (pressed.has('Enter') || pressed.has('Space')) { if (G.menuSel < 2) { sfx.bell(); startMatch(G.menuSel === 0 ? 'cpu' : 'pvp'); } }
-    if (pressed.has('Digit1')) { sfx.bell(); startMatch('cpu'); }
-    if (pressed.has('Digit2')) { sfx.bell(); startMatch('pvp'); }
+    if (G.menuSel === 2) {
+      if (pressed.has('ArrowLeft') || pressed.has('KeyA')) { G.level = (G.level + 2) % 3; sfx.ui(); }
+      if (pressed.has('ArrowRight') || pressed.has('KeyD') || ok) { G.level = (G.level + 1) % 3; sfx.ui(); }
+    } else if (ok) { sfx.bell(); startMatch(G.menuSel === 0 ? 'cpu' : 'pvp'); }
     pressed.clear(); return;
   }
 
-  if (G.hitstop > 0) { G.hitstop--; pressed.clear(); return; }
+  if (G.hitstop > 0) { G.hitstop--; return; }   // keep buffered presses so cancels come out
   const [a, b] = G.fighters;
-  const none = { left: false, right: false, up: false, down: false, punch: false, kick: false, special: false };
   G.sceneT++;
 
   if (G.scene === 'intro') {
-    updateFighter(a, b, none); updateFighter(b, a, none);
+    updateFighter(a, b, NONE); updateFighter(b, a, NONE);
     if (G.sceneT === 70) sfx.bell();
     if (G.sceneT > 110) { G.scene = 'fight'; G.sceneT = 0; }
   } else if (G.scene === 'fight') {
     const ia = readInput(0), ib = G.mode === 'pvp' ? readInput(1) : aiInput(b, a);
     updateFighter(a, b, ia); updateFighter(b, a, ib);
-    // 防止重叠
-    if (grounded(a) && grounded(b) && Math.abs(a.x - b.x) < 46) {
-      const push = (46 - Math.abs(a.x - b.x)) / 2, d = a.x <= b.x ? -1 : 1;
-      a.x = Math.max(40, Math.min(W - 40, a.x + d * push));
-      b.x = Math.max(40, Math.min(W - 40, b.x - d * push));
+    if (grounded(a) && grounded(b) && Math.abs(a.x - b.x) < 64) {
+      const push = (64 - Math.abs(a.x - b.x)) / 2, d = a.x <= b.x ? -1 : 1;
+      a.x = Math.max(EDGE, Math.min(W - EDGE, a.x + d * push));
+      b.x = Math.max(EDGE, Math.min(W - EDGE, b.x - d * push));
     }
     updateShots();
     G.frame++;
     if (G.frame % 60 === 0 && G.timer > 0) G.timer--;
-    if (a.hp <= 0 || b.hp <= 0) endRound(a.hp <= 0 && b.hp <= 0 ? null : a.hp > 0 ? a : b);
-    else if (G.timer <= 0) {
-      G.banner = '时间到';
-      const w = a.hp === b.hp ? null : a.hp > b.hp ? a : b;
-      G.scene = 'roundEnd'; G.sceneT = 0; if (w) w.wins++; sfx.bell();
-    }
+    if (a.hp <= 0 || b.hp <= 0) endRound(a.hp <= 0 && b.hp <= 0 ? null : a.hp > 0 ? a : b, 'K.O.');
+    else if (G.timer <= 0) { endRound(a.hp === b.hp ? null : a.hp > b.hp ? a : b, 'TIME UP'); G.sub = G.sub === 'PERFECT' ? '' : G.sub; sfx.bell(); }
   } else if (G.scene === 'roundEnd') {
-    updateFighter(a, b, none); updateFighter(b, a, none); updateShots();
+    updateFighter(a, b, NONE); updateFighter(b, a, NONE); updateShots();
     if (G.sceneT > 170) {
-      if (a.wins >= WINS_NEEDED || b.wins >= WINS_NEEDED) { G.scene = 'matchEnd'; G.sceneT = 0; }
+      if (a.wins >= WINS_NEEDED || b.wins >= WINS_NEEDED) { G.scene = 'matchEnd'; G.sceneT = 0; sfx.win(); }
       else { G.round++; startRound(); }
     }
   } else if (G.scene === 'matchEnd') {
-    updateFighter(a, b, none); updateFighter(b, a, none);
+    updateFighter(a, b, NONE); updateFighter(b, a, NONE);
     if (G.sceneT > 40 && (pressed.has('Enter') || pressed.has('Space'))) { G.scene = 'menu'; sfx.ui(); }
   }
   pressed.clear();
 }
 
-/* ---------- 绘制 ---------- */
-const skyline = Array.from({ length: 26 }, (_, i) => ({
-  x: i * 40 - 20, w: 34 + (i * 37 % 22), h: 70 + (i * 53 % 150),
-  win: Array.from({ length: 24 }, (_, k) => ((i * 7 + k * 13) % 5) < 2),
+/* ---------- Pixel rendering ---------- */
+const px = v => Math.round(v * S);
+function R(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x | 0, y | 0, w | 0, h | 0); }
+
+function seg(p, q, w, c) {
+  const dx = q[0] - p[0], dy = q[1] - p[1], n = Math.max(Math.abs(dx), Math.abs(dy), 1), o = w >> 1;
+  ctx.fillStyle = c;
+  for (let i = 0; i <= n; i++) ctx.fillRect(Math.round(p[0] + dx * i / n) - o, Math.round(p[1] + dy * i / n) - o, w, w);
+}
+function disc(cx, cy, r, c, y0 = -r, y1 = r) {
+  ctx.fillStyle = c;
+  for (let dy = y0; dy <= y1; dy++) { const h = Math.round(Math.sqrt(r * r - dy * dy)); ctx.fillRect(cx - h, cy + dy, h * 2 + 1, 1); }
+}
+
+/* 3x5 bitmap font */
+const FONT = {
+  A:'010101111101101',B:'110101110101110',C:'011100100100011',D:'110101101101110',E:'111100110100111',
+  F:'111100110100100',G:'011100101101011',H:'101101111101101',I:'111010010010111',J:'001001001101010',
+  K:'101101110101101',L:'100100100100111',M:'1000111011101011000110001',N:'10011101101110011001',O:'010101101101010',
+  P:'110101110100100',Q:'010101101110011',R:'110101110101101',S:'011100010001110',T:'111010010010010',
+  U:'101101101101111',V:'101101101101010',W:'1000110001101011101110001',X:'101101010101101',Y:'101101010010010',
+  Z:'111001010100111',
+  0:'111101101101111',1:'010110010010111',2:'110001010100111',3:'110001010001110',4:'101101111001001',
+  5:'111100110001110',6:'011100111101111',7:'111001010010010',8:'111101111101111',9:'111101111001110',
+  '.':'000000000000010','!':'010010010000010','-':'000000111000000','/':'001001010100100',
+  ':':'000010000010000',',':'000000000010100','+':'000010111010000','>':'100010001010100','<':'001010100010001',
+};
+const gw = chr => FONT[chr] ? FONT[chr].length / 5 : 3;
+const textW = (s, sc) => { let w = 0; for (const chr of s) w += (gw(chr) + 1) * sc; return w - sc; };
+function glyphs(str, x, y, sc, color) {
+  for (const chr of str) {
+    const g = FONT[chr], w = gw(chr);
+    if (g) for (let i = 0; i < g.length; i++) if (g[i] === '1') {
+      ctx.fillStyle = Array.isArray(color) ? color[(i / w) | 0] : color;
+      ctx.fillRect(x + (i % w) * sc, y + ((i / w) | 0) * sc, sc, sc);
+    }
+    x += (w + 1) * sc;
+  }
+}
+function txt(str, x, y, sc = 1, color = '#fff', align = 'center', shadow = OUT) {
+  str = String(str);
+  const w = textW(str, sc);
+  x = Math.round(align === 'center' ? x - w / 2 : align === 'right' ? x - w : x);
+  if (shadow) { glyphs(str, x + sc, y + sc, sc, shadow); if (sc > 1) glyphs(str, x - 1, y, sc, shadow), glyphs(str, x, y - 1, sc, shadow); }
+  glyphs(str, x, y, sc, color);
+}
+
+const SKY = ['#1a1140', '#2a1652', '#43205f', '#632a66', '#8a3666', '#b5485c', '#d96a4e', '#f09a4a'];
+const HORIZON = 172;
+const skyline = Array.from({ length: 24 }, (_, i) => ({
+  x: i * 16 - 4, w: 13 + (i * 37 % 8), h: 26 + (i * 53 % 62),
+  win: Array.from({ length: 40 }, (_, k) => ((i * 7 + k * 13) % 5) < 2),
 }));
 
 function drawStage() {
-  const g = ctx.createLinearGradient(0, 0, 0, GROUND);
-  g.addColorStop(0, '#1a1038'); g.addColorStop(0.55, '#6a2a5e'); g.addColorStop(1, '#f08a4b');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-  // 夕阳
-  ctx.fillStyle = 'rgba(255,214,130,.9)'; ctx.beginPath(); ctx.arc(690, 330, 80, 0, Math.PI * 2); ctx.fill();
-  // 楼群
-  for (const b of skyline) {
-    ctx.fillStyle = '#1b1430'; ctx.fillRect(b.x, GROUND - 40 - b.h, b.w, b.h + 40);
-    ctx.fillStyle = 'rgba(255,205,120,.55)';
-    b.win.forEach((on, k) => { if (on) { const wx = b.x + 5 + (k % 3) * 10, wy = GROUND - 30 - b.h + Math.floor(k / 3) * 18; if (wy < GROUND - 50) ctx.fillRect(wx, wy, 5, 8); } });
+  const bh = Math.ceil(HORIZON / SKY.length);
+  SKY.forEach((c, i) => {
+    R(0, i * bh, SW, bh, c);
+    if (i) { ctx.fillStyle = c; for (let x = (i % 2); x < SW; x += 2) ctx.fillRect(x, i * bh - 1, 1, 1); }
+  });
+  // sun
+  for (let dy = -34; dy <= 34; dy++) {
+    if (dy > 6 && (dy % 6 === 0 || dy % 6 === 1 && dy > 18)) continue;
+    const h = Math.round(Math.sqrt(34 * 34 - dy * dy));
+    R(276 - h, 132 + dy, h * 2 + 1, 1, dy < -12 ? '#fff0b0' : dy < 8 ? '#ffd88a' : '#ffb870');
   }
-  // 地面
-  const gg = ctx.createLinearGradient(0, GROUND - 20, 0, H);
-  gg.addColorStop(0, '#3a3348'); gg.addColorStop(1, '#15121f');
-  ctx.fillStyle = gg; ctx.fillRect(0, GROUND - 20, W, H - GROUND + 20);
-  ctx.strokeStyle = 'rgba(255,255,255,.07)'; ctx.lineWidth = 2;
-  for (let i = -6; i < 18; i++) { ctx.beginPath(); ctx.moveTo(W / 2 + i * 40, GROUND - 20); ctx.lineTo(W / 2 + i * 150, H); ctx.stroke(); }
-  ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(0, GROUND - 20, W, 2);
-}
-
-function limb(x1, y1, x2, y2, bend, w, color) {
-  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
-  ctx.strokeStyle = color; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  ctx.beginPath(); ctx.moveTo(x1, y1);
-  ctx.quadraticCurveTo(mx - dy / len * bend, my + dx / len * bend, x2, y2); ctx.stroke();
+  // skyline
+  for (const b of skyline) {
+    const top = HORIZON - 8 - b.h;
+    R(b.x, top, b.w, b.h + 8, '#1c1432'); R(b.x, top, 1, b.h + 8, '#2b2148');
+    b.win.forEach((on, k) => {
+      const wx = b.x + 2 + (k % 4) * 4, wy = top + 4 + ((k / 4) | 0) * 6;
+      if (on && wx < b.x + b.w - 2 && wy < HORIZON - 12) R(wx, wy, 2, 3, k % 7 === 0 ? '#ffe9a8' : '#e0a050');
+    });
+  }
+  R(0, HORIZON - 8, SW, 8, '#241a3a'); for (let x = 0; x < SW; x += 12) R(x, HORIZON - 8, 1, 8, '#171026');
+  // street
+  R(0, HORIZON, SW, SH - HORIZON, '#3b3352'); R(0, HORIZON, SW, 1, '#6a5f86');
+  for (let i = 0, y = HORIZON + 4, g = 3; y < SH; i++, y += g, g += 2) R(0, y, SW, 1, '#2c2640');
+  for (let i = -8; i <= 8; i++) {
+    const x0 = SW / 2 + i * 26, x1 = SW / 2 + i * 60;
+    seg([Math.round(x0), HORIZON + 1], [Math.round(x1), SH], 1, '#2c2640');
+  }
 }
 
 function drawFighter(f) {
   const c = f.ch, st = f.state;
-  // 影子
-  ctx.fillStyle = 'rgba(0,0,0,.35)';
-  ctx.beginPath(); ctx.ellipse(f.x, GROUND + 4, 38 - Math.min(18, (GROUND - f.y) / 8), 7, 0, 0, Math.PI * 2); ctx.fill();
+  const flash = st === 'hit' && f.t > 13;
+  const col = k => flash ? '#ffffff' : k;
 
-  ctx.save(); ctx.translate(f.x, f.y); ctx.scale(f.facing, 1);
+  const sw = px(70 - Math.min(34, (GROUND - f.y) / 5));
+  R(px(f.x) - (sw >> 1), px(GROUND) + 2, sw, 2, '#191326'); R(px(f.x) - (sw >> 1) + 2, px(GROUND) + 4, sw - 4, 1, '#191326');
+
   const crouch = st === 'crouch';
-  const bob = st === 'idle' ? Math.sin(G.frame * 0.12 + f.i) * 1.5 : 0;
-  let hipY = crouch ? -36 : -58, shY = (crouch ? -72 : -106) + bob, lean = 0;
-  let ext = 0;
-  if (ATK[st]) { const a = ATK[st]; ext = Math.sin(Math.min(1, f.t / (a.startup + 4)) * Math.PI * 0.5) * (f.t > a.startup + 6 ? Math.max(0, 1 - (f.t - a.startup - 6) / (a.total - a.startup - 6)) : 1); }
+  const bob = st === 'idle' && Math.sin(G.tick * 0.13 + f.i * 2) > 0 ? 2 : 0;
+  const hipY = crouch ? -36 : -58, shY = (crouch ? -72 : -106) + bob;
+  let lean = 0, ext = 0;
+  if (ATK[st]) {
+    const a = ATK[st], rec = a.startup + 6;
+    ext = Math.sin(Math.min(1, f.t / (a.startup + 4)) * Math.PI * 0.5) * (f.t > rec ? Math.max(0, 1 - (f.t - rec) / (a.total - rec)) : 1);
+  }
   if (st === 'hit') lean = -0.3;
   if (st === 'blockstun') lean = -0.1;
-  if (st === 'ko') { lean = -Math.PI / 2 * Math.min(1, f.t / 18); }
+  if (st === 'ko') lean = -Math.PI / 2 * Math.min(1, f.t / 18);
   if (st === 'punch' || st === 'special') lean = 0.12 * ext;
   if (st === 'kick') lean = -0.25 * ext;
-  if (st === 'ko' && grounded(f)) ctx.translate(0, -10);
-  ctx.rotate(lean);
+  const oy = st === 'ko' && grounded(f) ? -10 : 0;
+  const cs = Math.cos(lean), sn = Math.sin(lean);
+  const P = (lx, ly) => {
+    const rx = lx * cs - ly * sn, ry = lx * sn + ly * cs;
+    return [Math.round((f.x + f.facing * rx * SPR) * S), Math.round((f.y + (ry + oy) * SPR) * S)];
+  };
+  const limb = (a, b, bend, w, color, shade) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
+    const j = [(a[0] + b[0]) / 2 - dy / len * bend, (a[1] + b[1]) / 2 + dx / len * bend];
+    const pa = P(a[0], a[1]), pj = P(j[0], j[1]), pb = P(b[0], b[1]);
+    seg(pa, pj, w + 2, OUT); seg(pj, pb, w + 2, OUT);
+    seg(pa, pj, w, col(color)); seg(pj, pb, w, col(shade || color));
+    return pb;
+  };
 
-  // 腿
+  // legs
   let f1 = [16, 0], f2 = [-16, 0];
   if (st === 'walk') { const s = Math.sin(f.walk) * 16; f1 = [14 + s, -Math.max(0, -Math.sin(f.walk + 1.5)) * 8]; f2 = [-14 - s, -Math.max(0, Math.sin(f.walk + 1.5)) * 8]; }
-  if (st === 'jump' || (!grounded(f) && st !== 'ko' && st !== 'kick')) { f1 = [14, -22]; f2 = [-10, -12]; }
+  if (!grounded(f) && st !== 'ko' && st !== 'kick') { f1 = [14, -22]; f2 = [-10, -12]; }
   if (crouch) { f1 = [22, 0]; f2 = [-20, 0]; }
   if (st === 'kick') { f1 = [20 + 84 * ext, -66 * ext]; f2 = [-12, grounded(f) ? 0 : -14]; }
-  limb(-5, hipY, f2[0], f2[1], crouch ? -14 : -6, 13, '#23232e');
-  limb(5, hipY, f1[0], f1[1], st === 'kick' ? -4 * (1 - ext) : (crouch ? 16 : 7), 13, '#2c2c3a');
-  // 鞋
-  ctx.fillStyle = c.trim; for (const p of [f2, f1]) { ctx.beginPath(); ctx.ellipse(p[0] + 4, p[1] - 3, 10, 5, 0, 0, Math.PI * 2); ctx.fill(); }
 
-  // 后臂
+  // arms
   let h1 = [26, shY + 22], h2 = [12, shY + 30];
   if (f.blocking && st !== 'hit') { h1 = [22, shY - 6]; h2 = [18, shY + 8]; }
   if (st === 'punch') { h1 = [24 + 60 * ext, shY + 6]; h2 = [6, shY + 26]; }
   if (st === 'special') { h1 = [20 + 44 * ext, shY + 18]; h2 = [16 + 44 * ext, shY + 30]; }
   if (st === 'hit' || st === 'ko') { h1 = [18, shY - 16]; h2 = [-16, shY - 6]; }
   if (st === 'kick') { h1 = [10, shY + 22]; h2 = [-18, shY + 12]; }
-  limb(-4, shY + 6, h2[0], h2[1], 8, 10, c.skin);
 
-  // 躯干
-  limb(0, hipY, 0, shY + 4, crouch ? -8 : 0, 26, c.body);
-  ctx.strokeStyle = c.trim; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(-13, hipY + 2); ctx.lineTo(13, hipY + 2); ctx.stroke();
-  // 头
-  const hy = shY - 18;
-  ctx.fillStyle = c.skin; ctx.beginPath(); ctx.arc(3, hy, 15, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = c.body; ctx.lineWidth = 6; ctx.lineCap = 'butt';
-  ctx.beginPath(); ctx.arc(3, hy, 15, Math.PI * 1.08, Math.PI * 1.92); ctx.stroke();
-  const tail = Math.sin(G.frame * 0.2 + f.i * 2) * 4;
-  limb(-11, hy - 5, -30, hy + 2 + tail, 4, 4, c.body);
-  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(9, hy - 2, 5, st === 'hit' || st === 'ko' ? 2 : 4);
-  // 前臂 + 拳
-  limb(4, shY + 6, h1[0], h1[1], st === 'punch' ? -6 * (1 - ext) : -9, 10, c.skin);
-  ctx.fillStyle = c.trim; ctx.beginPath(); ctx.arc(h1[0], h1[1], 8, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(h2[0], h2[1], 7, 0, Math.PI * 2); ctx.fill();
-  // 蓄力光
-  if (st === 'special' && f.t < ATK.special.startup) {
-    ctx.fillStyle = c.fx; ctx.globalAlpha = 0.7;
-    ctx.beginPath(); ctx.arc(46, shY + 24, 6 + f.t, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
+  const shoe = p => { R(p[0] - 3, p[1] - 3, 7, 4, OUT); R(p[0] - 2 + (f.facing > 0 ? 1 : -1), p[1] - 2, 5, 2, col(c.trim)); };
+  const fist = (p, k) => { R(p[0] - 3, p[1] - 3, 7, 7, OUT); R(p[0] - 2, p[1] - 2, 5, 5, col(k)); R(p[0] - 2, p[1] - 2, 5, 1, col('#ffffff')); };
+
+  // back leg + back arm
+  shoe(limb([-5, hipY], f2, crouch ? -14 : -6, 5, '#1c1c2c'));
+  fist(limb([-4, shY + 6], h2, 8, 3, c.skinD), c.dark);
+  // torso
+  const hip = P(0, hipY), sh = P(0, shY + 6);
+  seg(hip, sh, 15, OUT); seg(hip, sh, 13, col(c.body));
+  seg([hip[0] - f.facing * 4, hip[1]], [sh[0] - f.facing * 4, sh[1]], 5, col(c.dark));
+  seg([hip[0] + f.facing * 4, hip[1] - 2], [sh[0] + f.facing * 4, sh[1]], 2, col(c.light));
+  R(hip[0] - 7, hip[1] - 1, 14, 3, col(c.trim)); R(hip[0] - 7, hip[1] + 2, 14, 1, OUT);
+  // head
+  const hd = P(3, shY - 20), r = 7, fx = f.facing;
+  disc(hd[0], hd[1], r + 1, OUT);
+  disc(hd[0], hd[1], r, col(c.skin));
+  disc(hd[0], hd[1], r, col(c.hair), -r, -3);
+  R(hd[0] - fx * 7 - 1, hd[1] - 3, 4, 5, col(c.hair));
+  if (f.i === 0) {           // LAN: knit beanie, pom-pom, long scarf
+    disc(hd[0], hd[1], r, col(c.light), -r, -4);
+    R(hd[0] - 7, hd[1] - 4, 15, 2, col(c.trim));
+    R(hd[0] - 2, hd[1] - r - 4, 5, 5, OUT); R(hd[0] - 1, hd[1] - r - 3, 3, 3, col(c.trim));
+    const nk = P(1, shY - 4), fl = Math.sin(G.tick * 0.2) > 0 ? 1 : 0;
+    R(nk[0] - 6, nk[1] - 2, 12, 4, OUT); R(nk[0] - 5, nk[1] - 1, 10, 2, col(c.trim));
+    seg([nk[0] - fx * 5, nk[1]], [nk[0] - fx * 10, nk[1] + 4 + fl], 3, col(c.trim));
+    seg([nk[0] - fx * 10, nk[1] + 4 + fl], [nk[0] - fx * 12, nk[1] + 10 - fl], 3, col(c.light));
+  } else {                   // YAN: spiked hair, visor shades
+    for (let k = -1; k <= 1; k++) { R(hd[0] + k * 4 - 1, hd[1] - r - 3, 3, 4, OUT); R(hd[0] + k * 4, hd[1] - r - 2, 1, 3, col(c.hair)); }
+    if (!flash) R(hd[0] + (fx > 0 ? 0 : -7), hd[1] - 2, 8, 3, c.trim);
   }
-  ctx.restore();
+  if (!flash) {
+    R(hd[0] + fx * 3 - (fx < 0 ? 1 : 0), hd[1] - 1, 2, st === 'hit' || st === 'ko' ? 1 : 2, OUT);
+    R(hd[0] + fx * 2 - (fx < 0 ? 2 : 0), hd[1] + 3, 3, 1, c.skinD);
+  }
+  // front leg + front arm
+  shoe(limb([5, hipY], f1, st === 'kick' ? -4 * (1 - ext) : (crouch ? 16 : 7), 5, c.pants));
+  const hand = limb([4, shY + 6], h1, st === 'punch' ? -6 * (1 - ext) : -9, 3, c.skin);
+  fist(hand, c.trim);
+  // charge glow
+  if (st === 'special' && f.t < ATK.special.startup) {
+    const g = P(46, shY + 24), rr = 2 + (f.t >> 1);
+    disc(g[0], g[1], rr, c.fxD); disc(g[0], g[1], Math.max(1, rr - 2), f.t % 4 < 2 ? '#ffffff' : c.fx);
+  }
 }
 
 function drawShot(s) {
-  const c = s.owner.ch.fx, r = 16 + Math.sin(G.frame * 0.5) * 3;
-  const g = ctx.createRadialGradient(s.x, s.y, 2, s.x, s.y, r + 12);
-  g.addColorStop(0, '#fff'); g.addColorStop(0.4, c); g.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s.x, s.y, r + 12, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = 0.4; ctx.fillStyle = c;
-  for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.arc(s.x - Math.sign(s.vx) * i * 14, s.y, r - i * 3.5, 0, Math.PI * 2); ctx.fill(); }
-  ctx.globalAlpha = 1;
-}
-
-function text(str, x, y, size, color = '#fff', align = 'center', weight = 800) {
-  ctx.font = `${weight} ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
-  ctx.lineWidth = Math.max(3, size / 9); ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineJoin = 'round';
-  ctx.strokeText(str, x, y); ctx.fillStyle = color; ctx.fillText(str, x, y);
+  const c = s.owner.ch, x = px(s.x), y = px(s.y), d = Math.sign(s.vx), fl = G.tick % 4 < 2;
+  if (s.owner.i === 0) {     // LAN: stacked wind crescents
+    for (let k = 2; k >= 0; k--) {
+      const r = 9 - k * 2, ox = x - d * k * 7, c2 = k === 0 ? '#ffffff' : k === 1 ? c.fx : c.fxD;
+      for (let dy = -r; dy <= r; dy++) {
+        const h = Math.round(Math.sqrt(r * r - dy * dy)), t = k === 0 ? 3 : 2;
+        if (k === 0) R(ox + (d > 0 ? h - t - 1 : -h - 1), y + dy, t + 2, 1, c.fxD);
+        R(ox + (d > 0 ? h - t : -h), y + dy, t, 1, fl && k ? c.fx : c2);
+      }
+    }
+  } else {                   // YAN: spinning ember shard with sparks
+    for (let i = 1; i <= 4; i++) R(x - d * i * 5 - 1, y + ((G.tick * 3 + i * 5) % 9) - 4, 2, 2, i % 2 ? c.fx : c.fxD);
+    for (let dy = -8; dy <= 8; dy++) R(x - (8 - Math.abs(dy)), y + dy, (8 - Math.abs(dy)) * 2 + 1, 1, OUT);
+    for (let dy = -6; dy <= 6; dy++) R(x - (6 - Math.abs(dy)), y + dy, (6 - Math.abs(dy)) * 2 + 1, 1, fl ? c.fxD : c.fx);
+    for (let dy = -3; dy <= 3; dy++) R(x - (3 - Math.abs(dy)), y + dy, (3 - Math.abs(dy)) * 2 + 1, 1, fl ? c.fx : '#ffffff');
+  }
 }
 
 function drawHUD() {
-  const [a, b] = G.fighters, bw = 370, bh = 22, y = 34;
-  [[a, 40, 1], [b, W - 40, -1]].forEach(([f, x0, d]) => {
-    const x = d === 1 ? x0 : x0 - bw;
-    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(x - 3, y - 3, bw + 6, bh + 6);
-    ctx.fillStyle = '#5a1620'; ctx.fillRect(x, y, bw, bh);
-    const wS = bw * f.shownHp / 100, wH = bw * f.hp / 100;
-    ctx.fillStyle = '#fff'; ctx.fillRect(d === 1 ? x + bw - wS : x, y, wS, bh);
-    ctx.fillStyle = f.hp > 30 ? '#ffd23f' : '#ff5a3c'; ctx.fillRect(d === 1 ? x + bw - wH : x, y, wH, bh);
-    // 能量
-    const ew = 180, ex = d === 1 ? x : x + bw - ew, we = ew * f.energy / 100;
-    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(ex - 2, y + bh + 8, ew + 4, 10);
-    ctx.fillStyle = f.energy >= ATK.special.cost ? f.ch.fx : '#667';
-    ctx.fillRect(d === 1 ? ex : ex + ew - we, y + bh + 10, we, 6);
-    const label = `${f.ch.name} ${f.ch.sub}` + (f.i === 1 && G.mode === 'cpu' ? ' · CPU' : f.i === 0 ? ' · P1' : ' · P2');
-    text(label, d === 1 ? x : x + bw, y - 16, 16, '#fff', d === 1 ? 'left' : 'right', 700);
+  const [a, b] = G.fighters, bw = 152, bh = 8, y = 14;
+  [[a, 16, 1], [b, SW - 16 - bw, -1]].forEach(([f, x, d]) => {
+    R(x - 2, y - 2, bw + 4, bh + 4, OUT); R(x - 1, y - 1, bw + 2, bh + 2, '#f4f0ff');
+    R(x, y, bw, bh, '#7a1420');
+    const wS = Math.round(bw * f.shownHp / 100), wH = Math.round(bw * f.hp / 100);
+    R(d === 1 ? x + bw - wS : x, y, wS, bh, '#ff4a3a');
+    R(d === 1 ? x + bw - wH : x, y, wH, bh, '#ffd23f'); R(d === 1 ? x + bw - wH : x, y, wH, 2, '#fff3a0');
+    const ew = 70, ex = d === 1 ? x : x + bw - ew, we = Math.round(ew * f.energy / 100), ready = f.energy >= ATK.special.cost;
+    R(ex - 1, y + bh + 4, ew + 2, 5, OUT);
+    R(d === 1 ? ex : ex + ew - we, y + bh + 5, we, 3, ready ? (G.tick % 20 < 10 ? f.ch.fx : '#ffffff') : '#6a6880');
+    const tag = f.i === 0 ? 'P1' : G.mode === 'cpu' ? 'CPU' : 'P2';
+    txt(f.ch.name, d === 1 ? x : x + bw, 4, 1, f.ch.light, d === 1 ? 'left' : 'right');
+    txt(tag, d === 1 ? x + 16 : x + bw - 16, 4, 1, '#c8c0e0', d === 1 ? 'left' : 'right');
     for (let i = 0; i < WINS_NEEDED; i++) {
-      ctx.fillStyle = i < f.wins ? '#ffd23f' : 'rgba(255,255,255,.2)';
-      ctx.beginPath(); ctx.arc(d === 1 ? x + bw - 10 - i * 20 : x + 10 + i * 20, y + bh + 15, 6, 0, Math.PI * 2); ctx.fill();
+      const wx = d === 1 ? x + bw - 6 - i * 8 : x + 1 + i * 8;
+      R(wx - 1, y + bh + 3, 7, 7, OUT); R(wx, y + bh + 4, 5, 5, i < f.wins ? '#ffd23f' : '#3a3352');
     }
+    if (f.combo >= 2) txt(f.combo + ' HITS', d === 1 ? 20 : SW - 20, 52, 2, '#ffd23f', d === 1 ? 'left' : 'right');
   });
-  text(String(G.timer).padStart(2, '0'), W / 2, y + 12, 40, G.timer <= 10 ? '#ff5a3c' : '#fff');
+  R(SW / 2 - 14, 8, 28, 20, OUT); R(SW / 2 - 13, 9, 26, 18, '#2a2244');
+  txt(String(G.timer).padStart(2, '0'), SW / 2 + 1, 11, 3, G.timer <= 10 ? '#ff5a3c' : '#ffffff', 'center', null);
 }
 
+const TITLE_COL = ['#fff6b8', '#ffe066', '#ffd23f', '#f59a2b', '#e0601e'];
 function drawMenu() {
   drawStage();
-  ctx.fillStyle = 'rgba(8,6,18,.62)'; ctx.fillRect(0, 0, W, H);
-  ctx.save(); ctx.translate(W / 2, 120); ctx.transform(1, 0, -0.18, 1, 0, 0);
-  text('STREEFIGHT', 0, 0, 96, '#ffd23f'); ctx.restore();
-  text('街 头 对 决', W / 2, 190, 24, '#ffb38a', 'center', 600);
-  const items = ['单人模式  vs CPU', '双人对战  本地 2P', `CPU 难度： ${['简单', '普通', '困难'][G.level]}`];
+  ctx.fillStyle = 'rgba(10,6,22,.6)'; ctx.fillRect(0, 0, SW, SH);
+  glyphs('STREEFIGHT', SW / 2 - textW('STREEFIGHT', 8) / 2 + 3, 25, 8, '#7a1420');
+  glyphs('STREEFIGHT', SW / 2 - textW('STREEFIGHT', 8) / 2, 22, 8, TITLE_COL);
+  txt('- ARCADE BRAWLER -', SW / 2, 70, 1, '#ffb38a');
+  const items = ['1P VS CPU', '2P VERSUS', 'CPU LEVEL: ' + ['EASY', 'NORMAL', 'HARD'][G.level]];
   items.forEach((s, i) => {
-    const sel = i === G.menuSel, y = 262 + i * 52;
-    if (sel) { ctx.fillStyle = 'rgba(255,210,63,.16)'; ctx.fillRect(W / 2 - 200, y - 22, 400, 44); ctx.fillStyle = '#ffd23f'; ctx.fillRect(W / 2 - 200, y - 22, 5, 44); }
-    text(s, W / 2, y, 26, sel ? '#fff' : '#b9b4c8', 'center', sel ? 800 : 600);
+    const sel = i === G.menuSel, y = 90 + i * 18;
+    if (sel) { R(SW / 2 - 78, y - 4, 156, 18, '#3a2a10'); R(SW / 2 - 78, y - 4, 156, 1, '#ffd23f'); R(SW / 2 - 78, y + 13, 156, 1, '#ffd23f'); if (G.tick % 30 < 20) txt('>', SW / 2 - 70, y, 2, '#ffd23f', 'left'); }
+    txt(s, SW / 2, y, 2, sel ? '#ffffff' : '#9a92b4');
   });
-  text('↑↓ 选择   Enter 确认   F11 全屏', W / 2, 430, 15, '#c8c3d6', 'center', 500);
-  text('P1： A/D 移动  W 跳  S 蹲  J 拳  K 腿  L 气功波      按住「后」防御', W / 2, 470, 15, '#9fd0ff', 'center', 500);
-  text('P2： ←/→ 移动  ↑ 跳  ↓ 蹲  ,  .  /  （或小键盘 1 2 3）', W / 2, 496, 15, '#ffb0a0', 'center', 500);
+  if (G.tick % 60 < 40) txt('PRESS ENTER', SW / 2, 150, 1, '#ffffff');
+  txt('P1: A/D MOVE  W JUMP  S CROUCH  J PUNCH  K KICK  L SPECIAL', SW / 2, 166, 1, '#9fd0ff');
+  txt('P2: ARROWS MOVE   , PUNCH   . KICK   / SPECIAL', SW / 2, 176, 1, '#ffb0a0');
+  txt('HOLD BACK: BLOCK    DOWN, DOWN+FWD, FWD + PUNCH: SPECIAL', SW / 2, 188, 1, '#e8e0ff');
+  txt('PUNCH > KICK > SPECIAL: COMBO     M: MUSIC   F11: FULLSCREEN', SW / 2, 198, 1, '#a8a0c0');
 }
 
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   if (G.scene === 'menu') { drawMenu(); return; }
-  if (G.shake > 0) ctx.translate((Math.random() - 0.5) * G.shake, (Math.random() - 0.5) * G.shake);
+  if (G.shake > 0) ctx.translate(Math.round((Math.random() - 0.5) * G.shake * 0.5), Math.round((Math.random() - 0.5) * G.shake * 0.5));
   drawStage();
-  const order = G.fighters.slice().sort((p, q) => (ATK[p.state] ? 1 : 0) - (ATK[q.state] ? 1 : 0));
-  order.forEach(drawFighter);
+  G.fighters.slice().sort((p, q) => (ATK[p.state] ? 1 : 0) - (ATK[q.state] ? 1 : 0)).forEach(drawFighter);
   G.shots.forEach(drawShot);
-  for (const p of G.sparks) { ctx.globalAlpha = Math.min(1, p.life / 10); ctx.fillStyle = p.color; ctx.fillRect(p.x - 3, p.y - 3, 6, 6); }
-  ctx.globalAlpha = 1;
+  for (const p of G.sparks) {
+    const x = px(p.x), y = px(p.y);
+    if (p.big) { const r = 2 + (6 - p.life) * 2; R(x - r, y - 1, r * 2, 2, p.color); R(x - 1, y - r, 2, r * 2, p.color); }
+    else R(x - 1, y - 1, p.life > 8 ? 3 : 2, p.life > 8 ? 3 : 2, p.life % 4 < 2 ? p.color : '#ffffff');
+  }
+  for (const p of G.popups) if (p.life > 12 || p.life % 4 < 2) txt(p.text, Math.max(50, Math.min(SW - 50, px(p.x))), px(p.y), 1, p.color);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   drawHUD();
 
   if (G.scene === 'intro') {
-    if (G.sceneT < 70) text(`ROUND ${G.round}`, W / 2, 220, 72, '#fff');
-    else text('FIGHT!', W / 2, 220, 96, '#ffd23f');
+    if (G.sceneT < 70) txt('ROUND ' + G.round, SW / 2, 72, 6, '#ffffff');
+    else if (G.sceneT % 6 < 4) txt('FIGHT!', SW / 2, 66, 8, TITLE_COL);
   } else if (G.scene === 'roundEnd') {
-    text(G.banner, W / 2, 220, 96, '#ff5a3c');
+    txt(G.banner, SW / 2, 62, 8, '#ff5a3c');
+    if (G.sub && G.sceneT > 40) txt(G.sub, SW / 2, 112, 3, '#ffd23f');
   } else if (G.scene === 'matchEnd') {
     const [a, b] = G.fighters, w = a.wins > b.wins ? a : b;
-    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 150, W, 190);
-    text(`${w.ch.name} ${w.ch.sub} 获胜！`, W / 2, 215, 64, w.ch.fx);
-    text(G.mode === 'cpu' ? (w.i === 0 ? '你赢了' : '再接再厉') : `玩家 ${w.i + 1} 胜利`, W / 2, 272, 24, '#fff', 'center', 600);
-    if (G.sceneT > 40) text('按 Enter 返回主菜单', W / 2, 312, 18, '#ddd', 'center', 500);
+    R(0, 58, SW, 78, OUT); R(0, 59, SW, 1, w.ch.fx); R(0, 134, SW, 1, w.ch.fx);
+    txt(w.ch.name + ' WINS', SW / 2, 68, 6, w.ch.fx);
+    txt(G.mode === 'cpu' ? (w.i === 0 ? 'YOU WIN!' : 'YOU LOSE') : 'PLAYER ' + (w.i + 1) + ' WINS', SW / 2, 106, 2, '#ffffff');
+    if (G.sceneT > 40 && G.tick % 60 < 40) txt('PRESS ENTER', SW / 2, 124, 1, '#c8c0e0');
   }
   if (G.paused) {
-    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H);
-    text('暂停', W / 2, 230, 64);
-    text('Esc 继续    Q 返回主菜单', W / 2, 300, 20, '#ddd', 'center', 500);
+    ctx.fillStyle = 'rgba(8,4,18,.7)'; ctx.fillRect(0, 0, SW, SH);
+    txt('PAUSED', SW / 2, 78, 6, '#ffffff');
+    txt('ESC: RESUME    Q: QUIT TO MENU', SW / 2, 124, 1, '#c8c0e0');
   }
 }
 
-/* ---------- 主循环 (固定 60Hz) ---------- */
+/* ---------- Main loop (fixed 60 Hz) ---------- */
 let last = 0, acc = 0;
 function loop(ts) {
   acc += Math.min(100, ts - last); last = ts;
