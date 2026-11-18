@@ -1,6 +1,6 @@
 # StreeFight
 
-An original retro-style 2D fighting game. Everything is generated at runtime — pixel art is drawn in code on a 384x216 buffer, sound is synthesized with WebAudio — so there are no asset files and no network access. Packaged with Electron as a Windows 11 installer.
+An original retro-style 2D fighting game. Everything is generated at runtime — characters and stage are vector art drawn in code at 1080p, sound is synthesized with WebAudio — so there are no asset files and no network access. Packaged with Electron as a Windows 11 installer.
 
 ## Game
 
@@ -26,9 +26,9 @@ Pushing to `main` or pushing a `v*` tag runs GitHub Actions and builds three ins
 
 | File | For |
 | --- | --- |
-| `StreeFight Setup 1.0.0-x64.exe` (name contains x64) | Intel / AMD 64-bit |
-| `StreeFight Setup 1.0.0-arm64.exe` (name contains arm64) | ARM64 (e.g. Snapdragon X) |
-| `StreeFight Setup 1.0.0.exe` | Universal: contains both, picks the right one at install time |
+| `StreeFight-Setup-1.0.0-x64.exe` | Intel / AMD 64-bit |
+| `StreeFight-Setup-1.0.0-arm64.exe` | ARM64 (e.g. Snapdragon X) |
+| `StreeFight-Setup-1.0.0-universal.exe` | Universal: contains both, picks the right one at install time |
 
 - Push to `main`: download from the run's Artifacts on the Actions page
 - Push a tag (`git tag v1.0.0 && git push --tags`): installers are attached to the Release
