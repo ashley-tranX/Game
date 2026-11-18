@@ -1,0 +1,37 @@
+{
+  "name": "streefight",
+  "productName": "StreeFight",
+  "version": "1.0.0",
+  "description": "StreeFight - 原创 2D 单机格斗游戏",
+  "main": "main.js",
+  "author": "StreeFight",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64 --arm64",
+    "dist:x64": "electron-builder --win --x64",
+    "dist:arm64": "electron-builder --win --arm64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.streefight.game",
+    "productName": "StreeFight",
+    "files": ["main.js", "src/**/*"],
+    "directories": { "output": "dist" },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64", "arm64"] }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "StreeFight",
+      "buildUniversalInstaller": true
+    }
+  }
+}

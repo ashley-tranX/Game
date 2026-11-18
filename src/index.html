@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreeFight</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07070c; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas {
+    width: min(100vw, calc(100vh * 16 / 9));
+    height: min(100vh, calc(100vw * 9 / 16));
+    display: block; background: #111; outline: none;
+    image-rendering: auto;
+  }
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="540" tabindex="0"></canvas>
+<script src="game.js"></script>
+</body>
+</html>
